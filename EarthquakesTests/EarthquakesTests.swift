@@ -43,4 +43,11 @@ struct EarthquakesTests {
         #expect(decoded.latitude == 19.2189998626709)
         #expect(decoded.longitude == -155.434173583984)
     }
+    
+    @Test func clienDoesFetchEarthquakeData() async throws {
+        let downloader = TestDownloader()
+        let quakeClient = QuakeClient(downloader: downloader)
+        let quakes = try await quakeClient.quakes
+        #expect(quakes.count == 6)
+    }
 }
