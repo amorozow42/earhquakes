@@ -8,7 +8,9 @@
 
 import Foundation
 
-struct QuakeClient {
+actor QuakeClient {
+    
+    private let oneHour = 3600
     
     private let feedURL = URL(string: "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson")!
     
@@ -20,6 +22,8 @@ struct QuakeClient {
     
     private let downloader: any HTTPDataDownloader
     
+    private let quakeCache: NSCache<NSString, CacheEntryObject> = NSCache()
+    
     init(downloader: any HTTPDataDownloader = URLSession.shared) {
         self.downloader = downloader
     }
@@ -28,7 +32,59 @@ struct QuakeClient {
         get async throws {
             let data = try await downloader.fetchData(from: feedURL)
             let allQuakes = try decoder.decode(GeoJSON.self, from: data)
-            return allQuakes.quakes
+            var updatedQuakes = allQuakes.quakes
+            if let olderThanOneHour = updatedQuakes.firstIndex(
+                where: { abs(Int($0.time.timeIntervalSinceNow)) > oneHour }) {
+                let indexRange = updatedQuakes.startIndex..<olderThanOneHour
+                print(indexRange)
+                try await withThrowingTaskGroup(of: (Int, QuakeLocation).self) { group in
+                    for index in indexRange {
+                        group.addTask {
+                            let location = try await self.quakeLocation(from: allQuakes.quakes[index].detail)
+                            return (index, location)
+                        }
+                    }
+                    
+                    while let result = await group.nextResult() {
+                        switch result {
+                        case .failure(let error):
+                            throw error
+                        case .success(let (index, location)):
+                            updatedQuakes[index].location = location
+                        }
+                    }
+                }
+            }
+
+            return updatedQuakes
+        }
+    }
+    
+    func quakeLocation(from url: URL) async throws -> QuakeLocation {
+        if let cached = quakeCache[url] {
+            switch cached {
+            case .ready(let location):
+                return location
+            case .inProgress(let task):
+                return try await task.value
+            }
+        }
+        
+        let task = Task<QuakeLocation, Error> {
+            let date = try await downloader.fetchData(from: url)
+            let location = try decoder.decode(QuakeLocation.self, from: date)
+            return location
+        }
+        
+        quakeCache[url] = .inProgress(task)
+        
+        do {
+            let location = try await task.value
+            quakeCache[url] = .ready(location)
+            return location
+        } catch {
+            quakeCache[url] = nil
+            throw error
         }
     }
 }
